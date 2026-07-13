@@ -1,25 +1,32 @@
 """Builds an interactive 2D race replay from FastF1's real positional
 telemetry (X/Y car coordinates over time) -- an actual reconstruction of
-where each car was on track, not an illustrative animation. Rendered as a
-Plotly figure with animation frames + a scrubber slider, embeddable
-directly in Gradio via gr.Plot.
+where each car was on track, not an illustrative animation.
+
+Rendered via a plain Gradio Slider + Plot (matplotlib), not a Plotly
+animation embedded in gr.Plot/gr.HTML. Two earlier attempts at shipping a
+client-side-animated Plotly figure both failed in the browser: gr.Plot
+renders a Plotly figure's data/layout as a static snapshot and drops the
+frames/play-button JS entirely, and embedding the full animated HTML via
+gr.HTML (and then via an iframe data-URI) still didn't render, consistent
+with Gradio sanitizing embedded <script>/<iframe> content out of HTML
+component output. Rather than keep fighting that, replay frames are
+rendered server-side on demand (one matplotlib figure per requested time
+index) and driven by Gradio's own native Slider/Button reactivity, which
+doesn't depend on any embedded third-party JS executing at all.
 """
 
-import base64
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
 import fastf1.plotting as fp
 
-# Caps the number of animation frames sent to the browser. A full race is
-# ~90 real minutes of telemetry sampled at ~4Hz -- animating every sample
-# would mean tens of thousands of frames, which is both too large a
-# payload to ship to a browser and too slow to be watchable as a replay
-# anyway. Frames are instead spaced evenly across the race so the whole
-# thing plays back in well under a minute.
-MAX_FRAMES = 400
+# Caps how many distinct time steps the replay has. A full race is ~90 real
+# minutes of telemetry sampled at ~4Hz -- there's no reason to keep more
+# steps than a scrubber slider can usefully distinguish, and each one only
+# costs a cheap on-demand matplotlib render (not a large upfront payload
+# like the old Plotly-animation approach), so this can stay generous.
+MAX_FRAMES = 300
 MIN_FRAME_SPACING_S = 2.0
 
 
@@ -46,14 +53,13 @@ def _resample_driver_position(pos_df: pd.DataFrame, time_grid: np.ndarray) -> pd
     )
 
 
-def build_race_replay(session, max_frames: int = MAX_FRAMES) -> go.Figure:
-    """Builds the replay by touching each driver's raw (~4Hz, tens of
-    thousands of rows) position series one at a time -- extracting only the
-    X/Y/SessionTime columns actually needed and immediately reducing to the
-    small (<=400 row) resampled series -- rather than holding all drivers'
-    full-resolution raw data in memory simultaneously. This matters
-    concretely on a memory-constrained deployment: see telemetry_data.py's
-    load_session docstring for the OOM this pipeline previously hit."""
+def prepare_replay_data(session, max_frames: int = MAX_FRAMES) -> dict:
+    """Precomputes everything needed to render any single replay time step
+    on demand: the static track outline, each driver's position aligned onto
+    a shared time grid, and driver labels/colors. Rendering one frame is
+    then just a cheap matplotlib plot indexed into these precomputed
+    arrays -- the actual (X, Y) telemetry lookup and team-color resolution
+    only happen once here, not on every slider drag."""
     track_x, track_y = _track_outline(session)
     results = session.results
 
@@ -83,87 +89,43 @@ def build_race_replay(session, max_frames: int = MAX_FRAMES) -> go.Figure:
         except Exception:
             return "#888888"
 
-    colors = {drv: _color(drv) for drv in driver_list}
-    labels = {drv: _label(drv) for drv in driver_list}
+    return {
+        "track_x": track_x,
+        "track_y": track_y,
+        "driver_list": driver_list,
+        "aligned": aligned,
+        "labels": {drv: _label(drv) for drv in driver_list},
+        "colors": {drv: _color(drv) for drv in driver_list},
+        "time_grid": time_grid,
+        "t_min": t_min,
+        "n_frames": n_frames,
+        "event_name": session.event["EventName"],
+        "year": session.event.year,
+    }
 
-    def _frame_traces(i):
-        traces = []
-        for drv in driver_list:
-            row = aligned[drv].iloc[i]
-            x = [row["X"]] if pd.notna(row["X"]) else [None]
-            y = [row["Y"]] if pd.notna(row["Y"]) else [None]
-            traces.append(go.Scatter(
-                x=x, y=y, mode="markers+text",
-                marker=dict(size=11, color=colors[drv], line=dict(width=1, color="black")),
-                text=[labels[drv]], textposition="top center",
-                textfont=dict(size=9),
-                name=labels[drv], hoverinfo="name",
-            ))
-        return traces
 
-    frames = [
-        go.Frame(data=_frame_traces(i), name=str(i), traces=list(range(1, len(driver_list) + 1)))
-        for i in range(n_frames)
-    ]
+def render_replay_frame(data: dict, frame_idx: int):
+    """Renders one time step as a static matplotlib figure: the track
+    outline plus every driver's position at that step (drivers with no
+    telemetry near this instant -- not yet on track, retired, DNS -- are
+    simply omitted, not shown at a fabricated position)."""
+    frame_idx = max(0, min(int(frame_idx), data["n_frames"] - 1))
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.plot(data["track_x"], data["track_y"], "-", color="#aaaaaa", linewidth=1.5)
 
-    track_trace = go.Scatter(
-        x=track_x, y=track_y, mode="lines",
-        line=dict(color="#aaaaaa", width=2), showlegend=False, hoverinfo="skip",
-    )
+    for drv in data["driver_list"]:
+        row = data["aligned"][drv].iloc[frame_idx]
+        if pd.isna(row["X"]):
+            continue
+        ax.plot(row["X"], row["Y"], "o", color=data["colors"][drv], markersize=9, markeredgecolor="black", markeredgewidth=0.5)
+        ax.annotate(data["labels"][drv], (row["X"], row["Y"]), fontsize=8, xytext=(4, 4), textcoords="offset points")
 
-    fig = go.Figure(data=[track_trace] + list(frames[0].data), frames=frames)
-    fig.update_layout(
-        title=f"{session.event['EventName']} {session.event.year} — Race Replay",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1),
-        showlegend=False,
-        height=700,
-        margin=dict(l=10, r=10, t=50, b=10),
-        updatemenus=[dict(
-            type="buttons", showactive=False, x=0.05, y=0.02,
-            buttons=[
-                dict(label="▶ Play", method="animate",
-                     args=[None, {"frame": {"duration": 60, "redraw": True}, "fromcurrent": True, "transition": {"duration": 0}}]),
-                dict(label="⏸ Pause", method="animate",
-                     args=[[None], {"frame": {"duration": 0}, "mode": "immediate"}]),
-            ],
-        )],
-        sliders=[dict(
-            x=0.1, len=0.85, y=0,
-            steps=[
-                dict(method="animate", args=[[str(i)], {"frame": {"duration": 0}, "mode": "immediate"}],
-                     label=f"{int(time_grid[i] - t_min)}s")
-                for i in range(0, n_frames, max(1, n_frames // 40))
-            ],
-        )],
-    )
+    ax.set_aspect("equal")
+    ax.axis("off")
+    elapsed = int(data["time_grid"][frame_idx] - data["t_min"])
+    ax.set_title(f"{data['event_name']} {data['year']} — t={elapsed}s")
+    fig.tight_layout()
     return fig
-
-
-def replay_to_iframe_html(fig: go.Figure, height: int = 720) -> str:
-    """Embeds the replay figure as a base64 data-URI iframe rather than
-    returning the HTML/script directly for a `gr.HTML` component to insert.
-
-    This is a direct fix for a real, confirmed browser bug: `gr.HTML`
-    inserts its content via an innerHTML-style DOM update, and browsers do
-    not execute <script> tags inserted that way (a standard JS/DOM
-    behavior, not a Gradio bug) -- so a first attempt at this fix (returning
-    `fig.to_html(full_html=False)` directly to `gr.HTML`) still didn't
-    animate live, even though the returned HTML string was independently
-    verified correct. An <iframe>'s content, by contrast, is parsed as its
-    own real document and *does* execute its own <script> tags normally --
-    the standard, reliable way to embed script-dependent third-party HTML
-    (Plotly's own animation JS) inside a host page that only accepts a
-    plain HTML string. A base64 data URI is used for the iframe `src`
-    (rather than the `srcdoc` attribute with the HTML inlined directly)
-    purely to sidestep HTML-attribute quote-escaping edge cases in a long,
-    script-heavy document."""
-    full_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
-    encoded = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
-    return (
-        f'<iframe src="data:text/html;base64,{encoded}" '
-        f'width="100%" height="{height}" style="border:none;"></iframe>'
-    )
 
 
 if __name__ == "__main__":
@@ -172,7 +134,8 @@ if __name__ == "__main__":
     events = get_finished_2026_events()
     row = events.iloc[0]
     session = load_session(int(row["year"]), int(row["RoundNumber"]), "R")
-    fig = build_race_replay(session)
-    print(f"Built replay with {len(fig.frames)} frames, {len(fig.data)} traces")
-    fig.write_html("replay_preview.html")
-    print("Wrote replay_preview.html")
+    data = prepare_replay_data(session)
+    print(f"Prepared {data['n_frames']} frames for {len(data['driver_list'])} drivers")
+    fig = render_replay_frame(data, data["n_frames"] // 2)
+    fig.savefig("replay_frame_check.png", dpi=100)
+    print("Wrote replay_frame_check.png")

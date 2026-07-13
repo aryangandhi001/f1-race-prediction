@@ -12,16 +12,23 @@ here can't affect the (much lighter, always-should-be-up) prediction demo.
 See src/telemetry_data.py and ANALYSIS.md for the full incident.
 """
 
+import time
+
 import os
 
 import gradio as gr
 import matplotlib.pyplot as plt
 
 from src.fastf1_data import fetch_all_results
-from src.replay import build_race_replay, replay_to_iframe_html
+from src.replay import prepare_replay_data, render_replay_frame
 from src.strategy import build_strategy_chart, pit_stop_summary
 from src.telemetry_analysis import compare_lap_telemetry, driver_top_speed_by_race
 from src.telemetry_data import get_finished_2026_events, load_session
+
+# Precomputed replay data keyed by event name -- built once per "Build
+# replay" click, then reused cheaply by the slider/play callbacks so
+# scrubbing doesn't re-fetch telemetry.
+_replay_data_cache: dict[str, dict] = {}
 
 finished_events = get_finished_2026_events()
 FINISHED_EVENT_NAMES = finished_events["EventName"].tolist()
@@ -53,16 +60,29 @@ def build_replay_tab(event_name: str, progress=gr.Progress()):
     round_number = int(_event_round_lookup[event_name])
     progress(0.1, desc="Loading full session telemetry (slow on first load, cached after)...")
     session = load_session(2026, round_number, "R")
-    progress(0.7, desc="Building replay frames...")
-    fig = build_race_replay(session)
-    progress(0.95, desc="Rendering...")
-    # See replay_to_iframe_html's docstring: gr.HTML drops embedded <script>
-    # tags (innerHTML-inserted scripts don't execute in browsers), so the
-    # animation is embedded via an iframe instead, which does execute its
-    # own scripts normally.
-    html = replay_to_iframe_html(fig)
+    progress(0.7, desc="Preparing replay data...")
+    data = prepare_replay_data(session)
+    _replay_data_cache[event_name] = data
+    progress(0.95, desc="Rendering first frame...")
+    fig0 = render_replay_frame(data, 0)
     progress(1.0)
-    return html
+    return fig0, gr.update(minimum=0, maximum=data["n_frames"] - 1, value=0, step=1)
+
+
+def scrub_replay(event_name: str, frame_idx: int):
+    data = _replay_data_cache.get(event_name)
+    if data is None:
+        return None
+    return render_replay_frame(data, frame_idx)
+
+
+def play_replay(event_name: str):
+    data = _replay_data_cache.get(event_name)
+    if data is None:
+        return
+    for i in range(data["n_frames"]):
+        yield render_replay_frame(data, i), i
+        time.sleep(0.04)
 
 
 def build_strategy_tab(event_name: str, progress=gr.Progress()):
@@ -118,14 +138,23 @@ with gr.Blocks(title="F1 2026 Telemetry") as demo:
     )
 
     with gr.Tab("Race Replay"):
+        gr.Markdown(
+            "Rendered server-side per frame (not a client-side animation) -- "
+            "drag the slider to scrub, or click Play to auto-advance."
+        )
         replay_event_input = gr.Dropdown(
             choices=FINISHED_EVENT_NAMES,
             value=FINISHED_EVENT_NAMES[0] if FINISHED_EVENT_NAMES else None,
             label="Finished 2026 race",
         )
         replay_btn = gr.Button("Build replay", variant="primary")
-        replay_plot = gr.HTML()
-        replay_btn.click(build_replay_tab, inputs=replay_event_input, outputs=replay_plot)
+        replay_plot = gr.Plot()
+        replay_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Time (drag to scrub)")
+        play_btn = gr.Button("▶ Play")
+
+        replay_btn.click(build_replay_tab, inputs=replay_event_input, outputs=[replay_plot, replay_slider])
+        replay_slider.release(scrub_replay, inputs=[replay_event_input, replay_slider], outputs=replay_plot)
+        play_btn.click(play_replay, inputs=replay_event_input, outputs=[replay_plot, replay_slider])
 
     with gr.Tab("Pit Strategy"):
         gr.Markdown(
