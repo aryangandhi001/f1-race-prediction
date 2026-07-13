@@ -15,7 +15,10 @@ RESULTS_PATH = DATA_DIR / "results.parquet"
 LAPS_SUMMARY_PATH = DATA_DIR / "laps_summary.parquet"
 SCHEDULE_PATH = DATA_DIR / "schedule.parquet"
 
-YEARS = [2022, 2023, 2024, 2025, 2026]  # 2022 = start of current ground-effect regulation era
+YEARS = [2026, 2025, 2024, 2023, 2022]  # most recent/relevant first -- FastF1's public API
+# rate-limits at 500 calls/hour, so a full 5-season pull can get interrupted
+# partway through; fetching newest-first means a partial run still captures
+# the most valuable (current-season) data before older data.
 SESSION_TYPES = ["R", "Q", "S"]  # Race, Qualifying, Sprint
 
 
@@ -24,7 +27,12 @@ def _init_cache():
     fastf1.Cache.enable_cache(str(CACHE_DIR))
 
 
-def get_full_schedule(years: list[int] = YEARS) -> pd.DataFrame:
+def get_full_schedule(years: list[int] = YEARS, force_refresh: bool = False) -> pd.DataFrame:
+    if SCHEDULE_PATH.exists() and not force_refresh:
+        cached = pd.read_parquet(SCHEDULE_PATH)
+        if set(years).issubset(set(cached["year"].unique())):
+            return cached[cached["year"].isin(years)].copy()
+
     _init_cache()
     frames = []
     for year in years:
