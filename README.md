@@ -38,6 +38,31 @@ needing to model specific technical changes.
 - **Demo** (`app.py`, Gradio): pick an upcoming track, see predicted win
   probabilities; view championship win-probability per driver.
 
+## Telemetry & race-engineering tools (local only)
+
+`telemetry_app.py` is a second Gradio app -- 2D race replay (real X/Y car
+positions from FastF1 positional telemetry), tyre/pit strategy charts,
+distance-aligned speed/throttle/brake/DRS comparison between two drivers,
+and straight-line top-speed trend across the season. It's real, working
+code, verified end-to-end locally against actual 2026 session data.
+
+**It is not deployed live.** Loading one full session's car + positional
+telemetry for all ~20 drivers measured at ~185-273MB of Python-tracked
+memory alone (via `tracemalloc`), on top of the base Gradio/pandas/plotly
+process footprint -- confirmed by directly OOM-killing a dedicated,
+isolated Render free-tier instance (512MB limit) on its first real
+request. FastF1 has no API to load telemetry for only 1-2 drivers; a
+session load parses all drivers' data as one batch internally, so there's
+no partial-load path to shrink this further. Running it needs either a
+host with more available memory, or a paid Render tier -- see
+`ANALYSIS.md` for the full investigation.
+
+Run it locally:
+
+```bash
+python telemetry_app.py
+```
+
 ## Setup
 
 ```bash
