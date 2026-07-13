@@ -18,7 +18,7 @@ import gradio as gr
 import matplotlib.pyplot as plt
 
 from src.fastf1_data import fetch_all_results
-from src.replay import build_race_replay
+from src.replay import build_race_replay, replay_to_iframe_html
 from src.strategy import build_strategy_chart, pit_stop_summary
 from src.telemetry_analysis import compare_lap_telemetry, driver_top_speed_by_race
 from src.telemetry_data import get_finished_2026_events, load_session
@@ -56,13 +56,11 @@ def build_replay_tab(event_name: str, progress=gr.Progress()):
     progress(0.7, desc="Building replay frames...")
     fig = build_race_replay(session)
     progress(0.95, desc="Rendering...")
-    # gr.Plot renders Plotly figures as a static data/layout snapshot and
-    # drops the frames/play-button/slider JS wiring -- confirmed directly:
-    # the replay showed up as a single still frame with a non-functional
-    # Play button. Rendering as raw HTML (fig.to_html) ships the actual
-    # Plotly.js animation wiring, the same code path a standalone
-    # fig.write_html() export uses, so Play/the slider genuinely work.
-    html = fig.to_html(include_plotlyjs="cdn", full_html=False)
+    # See replay_to_iframe_html's docstring: gr.HTML drops embedded <script>
+    # tags (innerHTML-inserted scripts don't execute in browsers), so the
+    # animation is embedded via an iframe instead, which does execute its
+    # own scripts normally.
+    html = replay_to_iframe_html(fig)
     progress(1.0)
     return html
 

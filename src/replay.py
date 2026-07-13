@@ -5,6 +5,8 @@ Plotly figure with animation frames + a scrubber slider, embeddable
 directly in Gradio via gr.Plot.
 """
 
+import base64
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -136,6 +138,32 @@ def build_race_replay(session, max_frames: int = MAX_FRAMES) -> go.Figure:
         )],
     )
     return fig
+
+
+def replay_to_iframe_html(fig: go.Figure, height: int = 720) -> str:
+    """Embeds the replay figure as a base64 data-URI iframe rather than
+    returning the HTML/script directly for a `gr.HTML` component to insert.
+
+    This is a direct fix for a real, confirmed browser bug: `gr.HTML`
+    inserts its content via an innerHTML-style DOM update, and browsers do
+    not execute <script> tags inserted that way (a standard JS/DOM
+    behavior, not a Gradio bug) -- so a first attempt at this fix (returning
+    `fig.to_html(full_html=False)` directly to `gr.HTML`) still didn't
+    animate live, even though the returned HTML string was independently
+    verified correct. An <iframe>'s content, by contrast, is parsed as its
+    own real document and *does* execute its own <script> tags normally --
+    the standard, reliable way to embed script-dependent third-party HTML
+    (Plotly's own animation JS) inside a host page that only accepts a
+    plain HTML string. A base64 data URI is used for the iframe `src`
+    (rather than the `srcdoc` attribute with the HTML inlined directly)
+    purely to sidestep HTML-attribute quote-escaping edge cases in a long,
+    script-heavy document."""
+    full_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+    encoded = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
+    return (
+        f'<iframe src="data:text/html;base64,{encoded}" '
+        f'width="100%" height="{height}" style="border:none;"></iframe>'
+    )
 
 
 if __name__ == "__main__":
