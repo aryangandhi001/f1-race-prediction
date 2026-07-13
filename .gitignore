@@ -10,3 +10,4 @@ fastf1_cache/
 .pytest_cache/
 *.log
 .gradio/
+ANALYSIS.md
