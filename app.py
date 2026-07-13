@@ -35,6 +35,19 @@ def _bar_chart(df, value_col, label_col, title):
     return fig
 
 
+def _no_sprint_fig(event_name: str):
+    """A blank sprint plot with no explanation reads as 'broken' -- most
+    events don't have a sprint (only 6/24 do), so this makes that explicit
+    instead of silently leaving the chart empty."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.text(
+        0.5, 0.5, f"{event_name} has no sprint race\n(only select 2026 weekends do)",
+        ha="center", va="center", fontsize=12, color="#666666", wrap=True,
+    )
+    ax.axis("off")
+    return fig
+
+
 def predict_next_race(event_name: str):
     event_row = remaining_events[remaining_events["EventName"] == event_name].iloc[0]
     is_sprint = "sprint" in str(event_row.get("EventFormat", "")).lower()
@@ -48,7 +61,7 @@ def predict_next_race(event_name: str):
         sprint_probs = predict_race_probabilities(sprint_model, sprint_features)
         sprint_fig = _bar_chart(sprint_probs, "win_probability", "Abbreviation", f"{event_name} — Sprint win probability")
         return race_fig, sprint_fig
-    return race_fig, None
+    return race_fig, _no_sprint_fig(event_name)
 
 
 def show_championship():
