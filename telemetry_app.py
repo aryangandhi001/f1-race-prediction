@@ -55,8 +55,16 @@ def build_replay_tab(event_name: str, progress=gr.Progress()):
     session = load_session(2026, round_number, "R")
     progress(0.7, desc="Building replay frames...")
     fig = build_race_replay(session)
+    progress(0.95, desc="Rendering...")
+    # gr.Plot renders Plotly figures as a static data/layout snapshot and
+    # drops the frames/play-button/slider JS wiring -- confirmed directly:
+    # the replay showed up as a single still frame with a non-functional
+    # Play button. Rendering as raw HTML (fig.to_html) ships the actual
+    # Plotly.js animation wiring, the same code path a standalone
+    # fig.write_html() export uses, so Play/the slider genuinely work.
+    html = fig.to_html(include_plotlyjs="cdn", full_html=False)
     progress(1.0)
-    return fig
+    return html
 
 
 def build_strategy_tab(event_name: str, progress=gr.Progress()):
@@ -118,7 +126,7 @@ with gr.Blocks(title="F1 2026 Telemetry") as demo:
             label="Finished 2026 race",
         )
         replay_btn = gr.Button("Build replay", variant="primary")
-        replay_plot = gr.Plot()
+        replay_plot = gr.HTML()
         replay_btn.click(build_replay_tab, inputs=replay_event_input, outputs=replay_plot)
 
     with gr.Tab("Pit Strategy"):
