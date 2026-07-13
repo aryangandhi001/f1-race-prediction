@@ -8,16 +8,28 @@ import pandas as pd
 
 from src.fastf1_data import fetch_all_results
 
-ROLLING_WINDOW = 5  # races
+ROLLING_WINDOW = 5  # races (used as EWM span -- see _add_ewm)
+
+# Status values that represent a genuine classified finish (including being
+# lapped) -- anything else (Retired, Did not start, Disqualified, Collision,
+# Engine, Gearbox, ...) is a DNF/incident. A DNF's finishing position reflects
+# "the run ended early", not "the car was slow that day" -- averaging it in
+# with genuine race pace unfairly tanks a fast car's recent-form score after
+# a single mechanical failure or crash.
+_FINISHED_STATUSES = {"Finished", "Lapped"}
 
 
-def _add_rolling(df: pd.DataFrame, group_col: str, value_col: str, window: int, out_col: str) -> pd.DataFrame:
-    """Rolling mean of `value_col` over the driver's/team's previous `window`
-    races, shifted by one so the current race's own result never leaks in."""
+def _add_ewm(df: pd.DataFrame, group_col: str, value_col: str, span: int, out_col: str) -> pd.DataFrame:
+    """Exponentially-weighted mean of `value_col` over the driver's/team's
+    prior races, shifted by one so the current race's own result never leaks
+    in. Recent races count more than older ones (unlike a flat rolling
+    mean), so a genuine recent form change shows up faster. `ignore_na=True`
+    means NaN rows (e.g. DNFs excluded via finish_position_clean) are
+    skipped entirely rather than breaking the decay sequence."""
     df = df.sort_values(["year", "round"])
     df[out_col] = (
         df.groupby(group_col)[value_col]
-        .transform(lambda s: s.shift(1).rolling(window, min_periods=1).mean())
+        .transform(lambda s: s.shift(1).ewm(span=span, min_periods=1, ignore_na=True).mean())
     )
     return df
 
@@ -46,26 +58,35 @@ def build_race_features(session_type: str = "R") -> pd.DataFrame:
     df["Points"] = pd.to_numeric(df["Points"], errors="coerce").fillna(0)
     df["finish_position"] = df["Position"].fillna(21)  # DNF/DNS -> worse than last
 
+    # DNF-excluded version of finish position, used for pace-form features
+    # only (points/grid features are unaffected by a race-day DNF and use
+    # the raw values -- 0 points for a DNF is correct signal, and grid
+    # position is a qualifying result untouched by what happens in the race).
+    df["is_dnf"] = ~df["Status"].isin(_FINISHED_STATUSES)
+    df["finish_position_clean"] = df["finish_position"].where(~df["is_dnf"])
+
     df = df.sort_values(["year", "round"]).reset_index(drop=True)
 
-    # Driver-level recent form
-    df = _add_rolling(df, "Abbreviation", "finish_position", ROLLING_WINDOW, "driver_recent_finish")
-    df = _add_rolling(df, "Abbreviation", "Points", ROLLING_WINDOW, "driver_recent_points")
-    df = _add_rolling(df, "Abbreviation", "GridPosition", ROLLING_WINDOW, "driver_recent_grid")
+    # Driver-level recent form (exponentially-weighted: recent races count
+    # more than older ones, so genuine current form shows up faster)
+    df = _add_ewm(df, "Abbreviation", "finish_position_clean", ROLLING_WINDOW, "driver_recent_finish")
+    df = _add_ewm(df, "Abbreviation", "Points", ROLLING_WINDOW, "driver_recent_points")
+    df = _add_ewm(df, "Abbreviation", "GridPosition", ROLLING_WINDOW, "driver_recent_grid")
 
     # Team-level recent form (car development / pace-trend proxy)
-    df = _add_rolling(df, "TeamName", "finish_position", ROLLING_WINDOW, "team_recent_finish")
-    df = _add_rolling(df, "TeamName", "Points", ROLLING_WINDOW, "team_recent_points")
-    df = _add_rolling(df, "TeamName", "GridPosition", ROLLING_WINDOW, "team_recent_grid")
+    df = _add_ewm(df, "TeamName", "finish_position_clean", ROLLING_WINDOW, "team_recent_finish")
+    df = _add_ewm(df, "TeamName", "Points", ROLLING_WINDOW, "team_recent_points")
+    df = _add_ewm(df, "TeamName", "GridPosition", ROLLING_WINDOW, "team_recent_grid")
 
-    # Team trend: last-3-race avg finish vs the 3 before that (negative = improving)
+    # Team trend: last-3-race (DNF-excluded) avg finish vs the 3 before that
+    # (negative = improving)
     def _trend(s: pd.Series) -> pd.Series:
         prior = s.shift(1)
         recent3 = prior.rolling(3, min_periods=1).mean()
         prev3 = prior.shift(3).rolling(3, min_periods=1).mean()
         return recent3 - prev3
 
-    df["team_trend"] = df.groupby("TeamName")["finish_position"].transform(_trend)
+    df["team_trend"] = df.groupby("TeamName")["finish_position_clean"].transform(_trend)
 
     # Track history: average finish at this specific event, from prior years
     # only. Both driver- and team-level: a driver's personal skill at a track
