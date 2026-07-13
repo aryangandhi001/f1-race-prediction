@@ -45,26 +45,30 @@ def _resample_driver_position(pos_df: pd.DataFrame, time_grid: np.ndarray) -> pd
 
 
 def build_race_replay(session, max_frames: int = MAX_FRAMES) -> go.Figure:
+    """Builds the replay by touching each driver's raw (~4Hz, tens of
+    thousands of rows) position series one at a time -- extracting only the
+    X/Y/SessionTime columns actually needed and immediately reducing to the
+    small (<=400 row) resampled series -- rather than holding all drivers'
+    full-resolution raw data in memory simultaneously. This matters
+    concretely on a memory-constrained deployment: see telemetry_data.py's
+    load_session docstring for the OOM this pipeline previously hit."""
     track_x, track_y = _track_outline(session)
     results = session.results
 
-    driver_positions = {}
-    for drv in session.drivers:
-        pos = session.pos_data.get(drv)
-        if pos is None or len(pos) == 0:
-            continue
-        pos = pos.copy()
-        pos["SessionTimeSeconds"] = pos["SessionTime"].dt.total_seconds()
-        driver_positions[drv] = pos
+    driver_list = [drv for drv in session.drivers if session.pos_data.get(drv) is not None and len(session.pos_data[drv]) > 0]
 
-    t_min = min(p["SessionTimeSeconds"].min() for p in driver_positions.values())
-    t_max = max(p["SessionTimeSeconds"].max() for p in driver_positions.values())
+    t_min = min(session.pos_data[drv]["SessionTime"].min().total_seconds() for drv in driver_list)
+    t_max = max(session.pos_data[drv]["SessionTime"].max().total_seconds() for drv in driver_list)
     n_frames = int(min(max_frames, (t_max - t_min) / MIN_FRAME_SPACING_S))
     n_frames = max(n_frames, 30)
     time_grid = np.linspace(t_min, t_max, n_frames)
 
-    driver_list = list(driver_positions.keys())
-    aligned = {drv: _resample_driver_position(driver_positions[drv], time_grid) for drv in driver_list}
+    aligned = {}
+    for drv in driver_list:
+        pos = session.pos_data[drv][["X", "Y", "SessionTime"]].copy()
+        pos["SessionTimeSeconds"] = pos["SessionTime"].dt.total_seconds()
+        aligned[drv] = _resample_driver_position(pos, time_grid)
+        del pos
 
     def _label(drv):
         return results.loc[drv, "Abbreviation"] if drv in results.index else drv

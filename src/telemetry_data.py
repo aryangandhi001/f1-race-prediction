@@ -6,6 +6,7 @@ features. Kept as a separate module since the win-probability/championship
 pipeline never needs this heavier data.
 """
 
+import gc
 from datetime import datetime
 
 import fastf1
@@ -37,18 +38,31 @@ def get_finished_2026_events() -> pd.DataFrame:
 
 
 def load_session(year: int, round_number: int, session_type: str = "R"):
-    """Loads one session's laps + car telemetry + positional data +
-    weather, keeping only this single session in memory (see module
-    docstring). A repeat call for the same session within one process is
-    free; a different session evicts the previous one before loading."""
+    """Loads one session's laps + car telemetry + positional data, keeping
+    only this single session in memory (see module docstring). A repeat
+    call for the same session within one process is free; a different
+    session evicts the previous one (and forces a GC pass so the freed
+    telemetry is actually released before the new load) before loading.
+
+    `weather=False`: none of the replay/strategy/telemetry-comparison
+    features use weather data, and it's one more multi-column time series
+    held in memory for no benefit -- skipped rather than loaded and ignored.
+    This, plus the single-session eviction, is a direct response to a real
+    OOM kill hit on a 512MB deployment when telemetry loading was added to
+    the same process as the always-on prediction pipeline; see ANALYSIS.md.
+    """
     global _loaded_session
     key = (year, round_number, session_type)
     if _loaded_session is not None and _loaded_session["key"] == key:
         return _loaded_session["session"]
 
+    if _loaded_session is not None:
+        _loaded_session = None
+        gc.collect()
+
     _init_cache()
     session = fastf1.get_session(year, round_number, session_type)
-    session.load(laps=True, telemetry=True, weather=True, messages=False)
+    session.load(laps=True, telemetry=True, weather=False, messages=False)
     _loaded_session = {"key": key, "session": session}
     return session
 
